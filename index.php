@@ -230,6 +230,11 @@ $enviado = $_SERVER['REQUEST_METHOD'] === 'POST';
         <div class="hidden flex-wrap gap-2 border-t border-slate-200 bg-slate-50 p-3 sm:flex">
           <button id="btnGenerar" type="button" class="btn">Generar esquela y enviar correo</button>
           <button id="btnImprimir" type="button" class="btn2" disabled>Imprimir esquela</button>
+          <a id="btnWhatsApp" class="btn2 hidden text-center" href="#" target="_blank" rel="noopener noreferrer">Compartir por WhatsApp</a>
+          <button id="btnCompartir" type="button" class="btn2 hidden">Compartir PDF</button>
+          <p id="notaWhatsApp" class="hidden text-[11px] leading-4 text-slate-600">
+            Se abrirá WhatsApp para que elija el contacto y confirme el envío. El archivo no se adjunta automáticamente.
+          </p>
         </div>
       </section>
 
@@ -742,6 +747,40 @@ $enviado = $_SERVER['REQUEST_METHOD'] === 'POST';
     $("msgCorreo").textContent =
       `Esquela ${codigo} generada por ${money(calc.valor)}. El envío real debe ejecutarse desde el backend al correo ${payload.correo}.`;
     $("btnImprimir").disabled = false;
+
+    try {
+      const response = await fetch("payment-order.php", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({applicant_code: codigo})
+      });
+      if (!response.ok) throw new Error("No se pudo crear el enlace temporal");
+      const {download_url: relativeUrl} = await response.json();
+      const signedUrl = new URL(relativeUrl, window.location.href).href;
+      const whatsappText = `Esquela de pago UNAH. Código de postulante: ${codigo}. Descarga temporal: ${signedUrl}`;
+      const whatsapp = $("btnWhatsApp");
+      whatsapp.href = `https://wa.me/?text=${encodeURIComponent(whatsappText)}`;
+      whatsapp.classList.remove("hidden");
+      $("notaWhatsApp").classList.remove("hidden");
+
+      if (navigator.share && navigator.canShare) {
+        const shareButton = $("btnCompartir");
+        shareButton.classList.remove("hidden");
+        shareButton.onclick = async () => {
+          try {
+            const pdfResponse = await fetch(signedUrl, {cache: "no-store"});
+            if (!pdfResponse.ok) throw new Error("El enlace expiró");
+            const file = new File([await pdfResponse.blob()], `esquela-${codigo}.pdf`, {type: "application/pdf"});
+            if (!navigator.canShare({files: [file]})) throw new Error("Este dispositivo no admite archivos");
+            await navigator.share({title: "Esquela de pago UNAH", text: `Código de postulante: ${codigo}`, files: [file]});
+          } catch (shareError) {
+            if (shareError.name !== "AbortError") alert(`${shareError.message}. Puede usar WhatsApp como alternativa.`);
+          }
+        };
+      }
+    } catch (linkError) {
+      alert(`${linkError.message}. La esquela todavía se puede imprimir.`);
+    }
   });
 
   $("btnImprimir").addEventListener("click", () => window.print());
@@ -825,4 +864,3 @@ $enviado = $_SERVER['REQUEST_METHOD'] === 'POST';
 </script>
 </body>
 </html>
-
