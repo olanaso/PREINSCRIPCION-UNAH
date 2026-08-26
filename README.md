@@ -1,20 +1,16 @@
 # PREINSCRIPCION-UNAH
 
-## Configuración del envío
+Aplicación PHP para crear órdenes de pago de admisión y entregarlas mediante enlaces temporales.
 
-La aplicación genera la orden antes de intentar el correo y conserva las órdenes en un directorio privado. Configure estas variables en el servidor:
-
-- `APP_KEY`: secreto aleatorio usado para firmar enlaces de descarga temporales.
-- `PAYMENT_ORDER_DIR`: directorio fuera de la raíz pública, escribible únicamente por el proceso PHP.
-- `MAIL_FROM`: remitente institucional autorizado por el servidor de correo.
-
-PHP debe tener configurado un transporte para `mail()`. Los reintentos usan el identificador interno devuelto por la primera solicitud y no generan una orden adicional.
-
-La búsqueda de postulantes por DNI se realiza desde el servidor mediante cURL contra el servicio de Qellqa. PHP debe tener habilitada la extensión `curl`; el navegador nunca consulta directamente el servicio externo.
-
-Para ejecutar la prueba automatizada:
+## Instalación
 
 ```bash
-php -d zend.assertions=1 -d assert.exception=1 tests/PaymentOrderServiceTest.php
-php -d zend.assertions=1 -d assert.exception=1 tests/DniLookupServiceTest.php
+composer install
+php -S 127.0.0.1:8000
 ```
+
+## Almacenamiento y eliminación de PDF
+
+Los PDF y sus metadatos se guardan con permisos restrictivos en `sys_get_temp_dir()/unah-payment-orders`, fuera del directorio servido por la aplicación. Los nombres internos se derivan del hash SHA-256 de un token aleatorio de 256 bits y nunca de la identidad ni del nombre proporcionado por el usuario.
+
+Cada orden expira **24 horas** después de generarse. La limpieza oportunista se ejecuta al guardar o consultar una orden y elimina el PDF y sus metadatos al vencer. En producción se recomienda ejecutar periódicamente una tarea que instancie `PaymentOrderStorage` y llame `purgeExpired()` (por ejemplo, cada hora) para garantizar la eliminación incluso cuando no haya tráfico.

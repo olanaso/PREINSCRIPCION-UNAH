@@ -211,7 +211,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       <!-- ESCUELA -->
       <section id="grupoEscuela" class="card">
         <div class="head">3. Escuela profesional</div>
-        <div class="p-2.5 sm:p-3">
+        <div class="grid gap-2 p-2.5 sm:grid-cols-[1fr_220px] sm:p-3">
+          <div>
           <label class="label">Escuela profesional a la que postula *</label>
           <input id="escuela" class="input" list="escuelas" placeholder="Escriba o seleccione">
           <datalist id="escuelas">
@@ -221,6 +222,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <option value="Ingeniería Civil">
             <option value="Ingeniería de Sistemas">
           </datalist>
+          </div>
+          <div>
+            <label class="label">Jornada *</label>
+            <select id="jornada" class="select">
+              <option value="Matutina">Matutina</option>
+              <option value="Vespertina">Vespertina</option>
+              <option value="Nocturna">Nocturna</option>
+              <option value="Fin de semana">Fin de semana</option>
+            </select>
+          </div>
         </div>
       </section>
 
@@ -805,33 +816,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $("eMonto").textContent = money(calc.valor);
   }
 
-  let pdfUrl = "";
-  let modalTrigger = null;
+  let paymentOrderUrl = null;
 
-  function abrirModalPdf(url, trigger) {
-    pdfUrl = url;
-    modalTrigger = trigger;
-    $("pdfPreview").src = url;
-    $("pdfFallback").href = url;
-    $("btnDescargarPdf").href = url;
-    $("btnWhatsappPdf").href = `https://wa.me/?text=${encodeURIComponent(`Esquela de pago UNAH: ${url}`)}`;
-    $("pdfModal").classList.remove("hidden");
-    $("pdfModal").classList.add("flex");
-    document.body.classList.add("overflow-hidden");
-    $("btnCerrarPdf").focus();
-  }
-
-  function cerrarModalPdf() {
-    if ($("pdfModal").classList.contains("hidden")) return;
-    $("pdfModal").classList.add("hidden");
-    $("pdfModal").classList.remove("flex");
-    document.body.classList.remove("overflow-hidden");
-    $("pdfPreview").src = "about:blank";
-    modalTrigger?.focus();
-  }
-
-  async function generarEsquela(event) {
-    const trigger = event.currentTarget;
+  $("btnGenerar").addEventListener("click", async () => {
     const error = validarFormulario();
     if (error) {
       alert(error);
@@ -844,7 +831,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       nombres: nombreCompleto(),
       correo: $("correo").value.trim(),
       celular: $("celular").value.trim(),
-      escuela: $("escuela").value.trim(),
+      carrera: $("escuela").value.trim(),
+      jornada: $("jornada").value,
       concepto: conceptoTexto(),
       concepto_key: $("conceptoPago").value,
       modalidad_key: $("modalidad").value,
@@ -856,75 +844,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       fecha_vencimiento: $("fechaVencimiento").value
     };
 
-    const botonesGenerar = [$("btnGenerar"), $("btnGenerarMobile")].filter(Boolean);
-    botonesGenerar.forEach(button => button.disabled = true);
-
     try {
-      const response = await fetch('/api/esquelas/generar-enviar', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json', 'Accept':'application/json'},
+      $("btnGenerar").disabled = true;
+      const response = await fetch("generate-payment-order.php", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
         body: JSON.stringify(payload)
       });
-      const data = await response.json().catch(() => null);
-      if (!response.ok) throw new Error(data?.message || 'No se pudo generar la esquela.');
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "No se pudo generar la orden.");
 
-      const ordenId = data?.id ?? data?.orden_id;
-      const token = data?.token;
-      if ((typeof ordenId !== 'string' && typeof ordenId !== 'number') || !String(ordenId).trim() || typeof token !== 'string' || !token.trim()) {
-        throw new Error('El servidor no devolvió una orden válida.');
-      }
-
-      const endpointPdf = new URL(`/api/esquelas/${encodeURIComponent(String(ordenId))}/pdf`, window.location.origin);
-      endpointPdf.searchParams.set('token', token);
-
+      paymentOrderUrl = result.url;
       $("estadoEnvio").classList.remove("hidden");
-      $("msgCorreo").textContent = `Esquela ${codigo} generada por ${money(calc.valor)} y enviada a ${payload.correo}.`;
+      $("msgCorreo").textContent = `Orden ${codigo} generada. El enlace protegido estará disponible hasta ${new Date(result.expires_at).toLocaleString()}.`;
       $("btnImprimir").disabled = false;
-      abrirModalPdf(endpointPdf.href, trigger);
-    } catch (errorGeneracion) {
-      alert(errorGeneracion.message || 'No se pudo generar la esquela. Inténtelo nuevamente.');
+      window.open(paymentOrderUrl, "_blank", "noopener");
+    } catch (error) {
+      alert(error.message);
     } finally {
-      botonesGenerar.forEach(button => button.disabled = !calcular().disponible);
+      $("btnGenerar").disabled = false;
     }
-  }
-
-  $("btnGenerar").addEventListener("click", generarEsquela);
-
-  function imprimirPdf() {
-    if (!pdfUrl) return;
-    const frameWindow = $("pdfPreview").contentWindow;
-    if (frameWindow) {
-      frameWindow.focus();
-      frameWindow.print();
-    }
-  }
-
-  $("btnImprimir").addEventListener("click", () => abrirModalPdf(pdfUrl, $("btnImprimir")));
-  $("btnImprimirPdf").addEventListener("click", imprimirPdf);
-  $("btnCerrarPdf").addEventListener("click", cerrarModalPdf);
-  $("pdfModal").addEventListener("click", event => {
-    if (event.target === $("pdfModal")) cerrarModalPdf();
   });
-  document.addEventListener("keydown", event => {
-    if ($("pdfModal").classList.contains("hidden")) return;
-    if (event.key === "Escape") {
-      event.preventDefault();
-      cerrarModalPdf();
-      return;
-    }
-    if (event.key !== "Tab") return;
-    const focusables = [...$("pdfModal").querySelectorAll('button, a[href], iframe, [tabindex]:not([tabindex="-1"])')]
-      .filter(element => !element.disabled && element.getClientRects().length);
-    if (!focusables.length) return;
-    const first = focusables[0];
-    const last = focusables[focusables.length - 1];
-    if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
+
+  $("btnImprimir").addEventListener("click", () => {
+    if (paymentOrderUrl) window.open(paymentOrderUrl, "_blank", "noopener");
   });
 
   document.querySelectorAll("input, select").forEach(el => {
