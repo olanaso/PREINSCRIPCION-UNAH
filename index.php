@@ -164,7 +164,8 @@ $enviado = $_SERVER['REQUEST_METHOD'] === 'POST';
       <!-- ESCUELA -->
       <section id="grupoEscuela" class="card">
         <div class="head">3. Escuela profesional</div>
-        <div class="p-2.5 sm:p-3">
+        <div class="grid gap-2 p-2.5 sm:grid-cols-[1fr_220px] sm:p-3">
+          <div>
           <label class="label">Escuela profesional a la que postula *</label>
           <input id="escuela" class="input" list="escuelas" placeholder="Escriba o seleccione">
           <datalist id="escuelas">
@@ -174,6 +175,16 @@ $enviado = $_SERVER['REQUEST_METHOD'] === 'POST';
             <option value="Ingeniería Civil">
             <option value="Ingeniería de Sistemas">
           </datalist>
+          </div>
+          <div>
+            <label class="label">Jornada *</label>
+            <select id="jornada" class="select">
+              <option value="Matutina">Matutina</option>
+              <option value="Vespertina">Vespertina</option>
+              <option value="Nocturna">Nocturna</option>
+              <option value="Fin de semana">Fin de semana</option>
+            </select>
+          </div>
         </div>
       </section>
 
@@ -692,6 +703,8 @@ $enviado = $_SERVER['REQUEST_METHOD'] === 'POST';
     $("eMonto").textContent = money(calc.valor);
   }
 
+  let paymentOrderUrl = null;
+
   $("btnGenerar").addEventListener("click", async () => {
     const error = validarFormulario();
     if (error) {
@@ -709,7 +722,8 @@ $enviado = $_SERVER['REQUEST_METHOD'] === 'POST';
       nombres: nombreCompleto(),
       correo: $("correo").value.trim(),
       celular: $("celular").value.trim(),
-      escuela: $("escuela").value.trim(),
+      carrera: $("escuela").value.trim(),
+      jornada: $("jornada").value,
       concepto: conceptoTexto(),
       modalidad: $("conceptoPago").value === "inscripcion" ? TASAS[$("modalidad").value].nombre : null,
       procedencia: $("conceptoPago").value === "inscripcion" ? $("procedencia").value : null,
@@ -719,32 +733,31 @@ $enviado = $_SERVER['REQUEST_METHOD'] === 'POST';
       fecha_vencimiento: $("fechaVencimiento").value
     };
 
-    /*
-      PRODUCCIÓN:
-      Conecte este formulario a su backend. Ejemplo:
-
-      const response = await fetch('/api/esquelas/generar-enviar', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
+    try {
+      $("btnGenerar").disabled = true;
+      const response = await fetch("generate-payment-order.php", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
         body: JSON.stringify(payload)
       });
-      if (!response.ok) throw new Error('No se pudo enviar el correo');
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "No se pudo generar la orden.");
 
-      El backend debe:
-      1) guardar la esquela,
-      2) generar el PDF,
-      3) adjuntar el PDF al correo,
-      4) enviar instrucciones de pago,
-      5) devolver el ID/código de la operación.
-    */
-
-    $("estadoEnvio").classList.remove("hidden");
-    $("msgCorreo").textContent =
-      `Esquela ${codigo} generada por ${money(calc.valor)}. El envío real debe ejecutarse desde el backend al correo ${payload.correo}.`;
-    $("btnImprimir").disabled = false;
+      paymentOrderUrl = result.url;
+      $("estadoEnvio").classList.remove("hidden");
+      $("msgCorreo").textContent = `Orden ${codigo} generada. El enlace protegido estará disponible hasta ${new Date(result.expires_at).toLocaleString()}.`;
+      $("btnImprimir").disabled = false;
+      window.open(paymentOrderUrl, "_blank", "noopener");
+    } catch (error) {
+      alert(error.message);
+    } finally {
+      $("btnGenerar").disabled = false;
+    }
   });
 
-  $("btnImprimir").addEventListener("click", () => window.print());
+  $("btnImprimir").addEventListener("click", () => {
+    if (paymentOrderUrl) window.open(paymentOrderUrl, "_blank", "noopener");
+  });
 
   document.querySelectorAll("input, select").forEach(el => {
     el.addEventListener("input", actualizarResumen);
