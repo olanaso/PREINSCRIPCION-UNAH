@@ -546,6 +546,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   </div>
 </div>
 
+<!-- VISTA PREVIA DEL PDF -->
+<div id="pdfModal" class="fixed inset-0 z-50 hidden items-center justify-center bg-slate-950/70 p-2 sm:p-4"
+     role="dialog" aria-modal="true" aria-labelledby="pdfModalTitle" aria-describedby="pdfModalDescription">
+  <div class="flex h-[96dvh] w-full max-w-5xl flex-col overflow-hidden bg-white shadow-2xl sm:h-[92dvh]">
+    <div class="flex items-start justify-between gap-3 border-b border-slate-200 px-3 py-2.5 sm:px-4">
+      <div>
+        <h2 id="pdfModalTitle" class="text-sm font-bold text-vino-900 sm:text-base">Esquela de pago generada</h2>
+        <p id="pdfModalDescription" class="mt-0.5 text-[11px] text-slate-600 sm:text-xs">
+          Revise el documento antes de descargarlo, imprimirlo o compartirlo.
+        </p>
+      </div>
+      <button id="btnCerrarPdf" type="button" class="btn2 shrink-0 px-3" aria-label="Cerrar vista previa del PDF">Cerrar</button>
+    </div>
+
+    <div class="min-h-0 flex-1 bg-slate-200 p-1.5 sm:p-3">
+      <iframe id="pdfPreview" class="h-full w-full border-0 bg-white" title="Vista previa de la esquela en PDF"></iframe>
+    </div>
+
+    <div class="border-t border-slate-200 bg-white px-3 py-2.5 sm:px-4">
+      <p class="mb-2 text-[11px] text-slate-600">
+        ¿No puede visualizar el PDF? <a id="pdfFallback" class="font-bold text-vino-700 underline" href="#" download>Descargue la esquela directamente</a>.
+      </p>
+      <div class="grid grid-cols-1 gap-2 sm:flex sm:flex-wrap sm:justify-end">
+        <a id="btnDescargarPdf" class="btn2" href="#" download>Descargar PDF</a>
+        <button id="btnImprimirPdf" type="button" class="btn2">Imprimir</button>
+        <a id="btnWhatsappPdf" class="btn" href="#" target="_blank" rel="noopener noreferrer">Compartir por WhatsApp</a>
+      </div>
+    </div>
+  </div>
+</div>
+
 
 <!-- IMPRESIÓN -->
 <div id="printArea" class="hidden">
@@ -774,29 +805,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $("eMonto").textContent = money(calc.valor);
   }
 
-  let ultimaOrdenId = null;
+  let pdfUrl = "";
+  let modalTrigger = null;
 
-  function mostrarResultado(result) {
-    ultimaOrdenId = result.order_id;
-    const enviado = result.mail_sent;
-    $("estadoEnvio").classList.remove("hidden");
-    $("estadoEnvioDetalle").className = `border-l-4 p-3 ${enviado ? "border-emerald-600" : "border-amber-500"}`;
-    $("tituloEnvio").className = `text-xs font-bold ${enviado ? "text-emerald-700" : "text-amber-800"}`;
-    $("tituloEnvio").textContent = enviado ? "Orden generada y correo enviado" : "Orden generada; correo pendiente";
-    $("msgCorreo").textContent = result.message;
-    $("enlaceEsquela").href = result.download_url;
-    $("btnReintentar").classList.toggle("hidden", enviado);
-    $("btnImprimir").disabled = false;
+  function abrirModalPdf(url, trigger) {
+    pdfUrl = url;
+    modalTrigger = trigger;
+    $("pdfPreview").src = url;
+    $("pdfFallback").href = url;
+    $("btnDescargarPdf").href = url;
+    $("btnWhatsappPdf").href = `https://wa.me/?text=${encodeURIComponent(`Esquela de pago UNAH: ${url}`)}`;
+    $("pdfModal").classList.remove("hidden");
+    $("pdfModal").classList.add("flex");
+    document.body.classList.add("overflow-hidden");
+    $("btnCerrarPdf").focus();
   }
 
-  async function enviarSolicitud(payload) {
-    const response = await fetch(window.location.pathname, {method:"POST", headers:{"Content-Type":"application/json", "Accept":"application/json"}, body:JSON.stringify(payload)});
-    const result = await response.json().catch(() => ({message:"No pudimos completar la solicitud. Intente nuevamente."}));
-    if (!response.ok) throw new Error(result.message || "No pudimos completar la solicitud. Intente nuevamente.");
-    return result;
+  function cerrarModalPdf() {
+    if ($("pdfModal").classList.contains("hidden")) return;
+    $("pdfModal").classList.add("hidden");
+    $("pdfModal").classList.remove("flex");
+    document.body.classList.remove("overflow-hidden");
+    $("pdfPreview").src = "about:blank";
+    modalTrigger?.focus();
   }
 
-  $("btnGenerar").addEventListener("click", async () => {
+  async function generarEsquela(event) {
+    const trigger = event.currentTarget;
     const error = validarFormulario();
     if (error) {
       alert(error);
@@ -821,30 +856,75 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       fecha_vencimiento: $("fechaVencimiento").value
     };
 
-    $("btnGenerar").disabled = true;
+    const botonesGenerar = [$("btnGenerar"), $("btnGenerarMobile")].filter(Boolean);
+    botonesGenerar.forEach(button => button.disabled = true);
+
     try {
-      const result = await enviarSolicitud(payload);
-      prepararEsquela(result.code, calc);
-      mostrarResultado(result);
-    } catch (error) {
-      alert(error.message || "No pudimos completar la solicitud. Intente nuevamente.");
+      const response = await fetch('/api/esquelas/generar-enviar', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json', 'Accept':'application/json'},
+        body: JSON.stringify(payload)
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(data?.message || 'No se pudo generar la esquela.');
+
+      const ordenId = data?.id ?? data?.orden_id;
+      const token = data?.token;
+      if ((typeof ordenId !== 'string' && typeof ordenId !== 'number') || !String(ordenId).trim() || typeof token !== 'string' || !token.trim()) {
+        throw new Error('El servidor no devolvió una orden válida.');
+      }
+
+      const endpointPdf = new URL(`/api/esquelas/${encodeURIComponent(String(ordenId))}/pdf`, window.location.origin);
+      endpointPdf.searchParams.set('token', token);
+
+      $("estadoEnvio").classList.remove("hidden");
+      $("msgCorreo").textContent = `Esquela ${codigo} generada por ${money(calc.valor)} y enviada a ${payload.correo}.`;
+      $("btnImprimir").disabled = false;
+      abrirModalPdf(endpointPdf.href, trigger);
+    } catch (errorGeneracion) {
+      alert(errorGeneracion.message || 'No se pudo generar la esquela. Inténtelo nuevamente.');
     } finally {
-      $("btnGenerar").disabled = false;
+      botonesGenerar.forEach(button => button.disabled = !calcular().disponible);
     }
-  });
+  }
 
-  $("btnReintentar").addEventListener("click", async () => {
-    if (!ultimaOrdenId) return;
-    $("btnReintentar").disabled = true;
-    try { mostrarResultado(await enviarSolicitud({retry_order_id: ultimaOrdenId})); }
-    catch (error) { alert(error.message || "No fue posible reenviar el correo. Intente nuevamente."); }
-    finally { $("btnReintentar").disabled = false; }
-  });
+  $("btnGenerar").addEventListener("click", generarEsquela);
 
-  $("btnImprimir").addEventListener("click", () => window.print());
-  $("btnBuscarDni").addEventListener("click", buscarDni);
-  $("dni").addEventListener("keydown", event => {
-    if (event.key === "Enter") { event.preventDefault(); buscarDni(); }
+  function imprimirPdf() {
+    if (!pdfUrl) return;
+    const frameWindow = $("pdfPreview").contentWindow;
+    if (frameWindow) {
+      frameWindow.focus();
+      frameWindow.print();
+    }
+  }
+
+  $("btnImprimir").addEventListener("click", () => abrirModalPdf(pdfUrl, $("btnImprimir")));
+  $("btnImprimirPdf").addEventListener("click", imprimirPdf);
+  $("btnCerrarPdf").addEventListener("click", cerrarModalPdf);
+  $("pdfModal").addEventListener("click", event => {
+    if (event.target === $("pdfModal")) cerrarModalPdf();
+  });
+  document.addEventListener("keydown", event => {
+    if ($("pdfModal").classList.contains("hidden")) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      cerrarModalPdf();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusables = [...$("pdfModal").querySelectorAll('button, a[href], iframe, [tabindex]:not([tabindex="-1"])')]
+      .filter(element => !element.disabled && element.getClientRects().length);
+    if (!focusables.length) return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
   });
 
   document.querySelectorAll("input, select").forEach(el => {
@@ -911,8 +991,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   const btnGenerarMobile = $("btnGenerarMobile");
   const btnImprimirMobile = $("btnImprimirMobile");
 
-  btnGenerarMobile?.addEventListener("click", () => $("btnGenerar").click());
-  btnImprimirMobile?.addEventListener("click", () => $("btnImprimir").click());
+  btnGenerarMobile?.addEventListener("click", generarEsquela);
+  btnImprimirMobile?.addEventListener("click", () => abrirModalPdf(pdfUrl, btnImprimirMobile));
 
   const observer = new MutationObserver(() => {
     if (btnGenerarMobile) btnGenerarMobile.disabled = $("btnGenerar").disabled;
