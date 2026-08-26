@@ -1,5 +1,48 @@
 <?php
-$enviado = $_SERVER['REQUEST_METHOD'] === 'POST';
+declare(strict_types=1);
+require_once __DIR__ . '/src/PaymentOrderService.php';
+require_once __DIR__ . '/src/DniLookupService.php';
+
+$dataDirectory = getenv('PAYMENT_ORDER_DIR') ?: sys_get_temp_dir() . '/unah-payment-orders';
+$service = new PaymentOrderService(new PaymentOrderRepository($dataDirectory), new PaymentOrderPdf(), new PaymentOrderMailer(), getenv('APP_KEY') ?: 'local-development-key-change-in-production', $dataDirectory . '/mail.log');
+$baseUrl = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' ? 'https' : 'http') . '://' . ($_SERVER['HTTP_HOST'] ?? 'localhost') . strtok($_SERVER['REQUEST_URI'] ?? '/', '?');
+
+if (isset($_GET['consultar_dni'])) {
+  header('Content-Type: application/json; charset=utf-8');
+  try {
+    $person = (new DniLookupService(new CurlDniHttpClient()))->lookup(trim((string) $_GET['consultar_dni']));
+    echo json_encode(['ok' => true, 'persona' => $person], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+  } catch (InvalidArgumentException $error) {
+    http_response_code(404); echo json_encode(['ok' => false, 'message' => $error->getMessage()], JSON_UNESCAPED_UNICODE);
+  } catch (Throwable $error) {
+    error_log('dni lookup failed: ' . $error::class . PHP_EOL, 3, $dataDirectory . '/mail.log');
+    http_response_code(502); echo json_encode(['ok' => false, 'message' => 'No fue posible consultar el DNI. Intente nuevamente.'], JSON_UNESCAPED_UNICODE);
+  }
+  exit;
+}
+
+if (isset($_GET['download'], $_GET['expires'], $_GET['signature'])) {
+  $document = $service->download((string)$_GET['download'], (int)$_GET['expires'], (string)$_GET['signature']);
+  if (!$document) { http_response_code(404); exit('El enlace no es válido o ha expirado.'); }
+  header('Content-Type: application/pdf'); header('Content-Disposition: attachment; filename="' . $document['name'] . '"');
+  header('X-Content-Type-Options: nosniff'); echo $document['content']; exit;
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+  header('Content-Type: application/json; charset=utf-8');
+  try {
+    $input = json_decode(file_get_contents('php://input'), true, 512, JSON_THROW_ON_ERROR);
+    $result = isset($input['retry_order_id']) ? $service->retry((string)$input['retry_order_id'], $baseUrl) : $service->createAndSend($input, $baseUrl);
+    echo json_encode($result, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+  } catch (InvalidArgumentException|JsonException $error) {
+    http_response_code(422); echo json_encode(['ok'=>false, 'message'=>$error instanceof JsonException ? 'La solicitud no es válida.' : $error->getMessage()]);
+  } catch (Throwable $error) {
+    error_log('payment-order request failed: ' . $error::class . PHP_EOL, 3, $dataDirectory . '/mail.log');
+    @chmod($dataDirectory . '/mail.log', 0600);
+    http_response_code(500); echo json_encode(['ok'=>false, 'message'=>'No pudimos completar la solicitud. Intente nuevamente.']);
+  }
+  exit;
+}
 ?>
 <!doctype html>
 <html lang="es">
@@ -58,9 +101,13 @@ $enviado = $_SERVER['REQUEST_METHOD'] === 'POST';
       <section class="card">
         <div class="head">1. Datos del postulante</div>
         <div class="grid gap-2 p-2.5 sm:grid-cols-2 md:grid-cols-3 sm:p-3">
-          <div>
+          <div class="sm:col-span-2 md:col-span-1">
             <label class="label">DNI *</label>
-            <input id="dni" class="input" maxlength="8" inputmode="numeric" autocomplete="off" placeholder="12345678">
+            <div class="flex gap-1.5">
+              <input id="dni" class="input min-w-0" maxlength="8" inputmode="numeric" autocomplete="off" placeholder="12345678">
+              <button id="btnBuscarDni" type="button" class="btn2 shrink-0">Buscar</button>
+            </div>
+            <p id="estadoDni" class="mt-1 hidden text-[10px] font-semibold" aria-live="polite"></p>
           </div>
           <div>
             <label class="label">Apellido paterno *</label>
@@ -466,9 +513,13 @@ $enviado = $_SERVER['REQUEST_METHOD'] === 'POST';
       </section>
 
       <section id="estadoEnvio" class="card hidden">
-        <div class="border-l-4 border-emerald-600 p-3">
-          <p class="text-xs font-bold text-emerald-700">Esquela generada</p>
+        <div id="estadoEnvioDetalle" class="border-l-4 border-emerald-600 p-3">
+          <p id="tituloEnvio" class="text-xs font-bold text-emerald-700">Esquela generada</p>
           <p id="msgCorreo" class="mt-1 text-[11px] leading-4 text-slate-600"></p>
+          <div class="mt-2 flex flex-wrap gap-2">
+            <a id="enlaceEsquela" class="btn2" href="#">Descargar PDF</a>
+            <button id="btnReintentar" type="button" class="btn2 hidden">Reintentar correo</button>
+          </div>
         </div>
       </section>
 
@@ -665,6 +716,36 @@ $enviado = $_SERVER['REQUEST_METHOD'] === 'POST';
     calcular();
   }
 
+  async function buscarDni() {
+    const dni = $("dni").value.trim();
+    const estado = $("estadoDni");
+    if (!/^\d{8}$/.test(dni)) {
+      estado.className = "mt-1 text-[10px] font-semibold text-red-700";
+      estado.textContent = "Ingrese un DNI válido de 8 dígitos.";
+      return;
+    }
+
+    $("btnBuscarDni").disabled = true;
+    estado.className = "mt-1 text-[10px] font-semibold text-slate-600";
+    estado.textContent = "Consultando DNI…";
+    try {
+      const response = await fetch(`${window.location.pathname}?consultar_dni=${encodeURIComponent(dni)}`, {headers:{"Accept":"application/json"}});
+      const result = await response.json().catch(() => ({message:"Respuesta no válida del servicio."}));
+      if (!response.ok || !result.ok) throw new Error(result.message || "No se encontraron datos para el DNI.");
+      $("nombres").value = result.persona.nombres || "";
+      $("apPaterno").value = result.persona.apellido_paterno || "";
+      $("apMaterno").value = result.persona.apellido_materno || "";
+      estado.className = "mt-1 text-[10px] font-semibold text-emerald-700";
+      estado.textContent = "Datos cargados correctamente.";
+      actualizarResumen();
+    } catch (error) {
+      estado.className = "mt-1 text-[10px] font-semibold text-red-700";
+      estado.textContent = error.message || "No fue posible consultar el DNI.";
+    } finally {
+      $("btnBuscarDni").disabled = false;
+    }
+  }
+
   function renderTabla() {
     const tbody = $("tablaTasas");
     if (!tbody) return;
@@ -758,17 +839,15 @@ $enviado = $_SERVER['REQUEST_METHOD'] === 'POST';
     }
 
     const calc = calcular();
-    const codigo = generarCodigo();
-    prepararEsquela(codigo, calc);
-
     const payload = {
-      codigo,
       dni: $("dni").value.trim(),
       nombres: nombreCompleto(),
       correo: $("correo").value.trim(),
       celular: $("celular").value.trim(),
       escuela: $("escuela").value.trim(),
       concepto: conceptoTexto(),
+      concepto_key: $("conceptoPago").value,
+      modalidad_key: $("modalidad").value,
       modalidad: $("conceptoPago").value === "inscripcion" ? TASAS[$("modalidad").value].nombre : null,
       procedencia: $("conceptoPago").value === "inscripcion" ? $("procedencia").value : null,
       periodo: $("conceptoPago").value === "inscripcion" ? $("periodo").value : null,
