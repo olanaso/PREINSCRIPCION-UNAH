@@ -1,10 +1,25 @@
 <?php
 declare(strict_types=1);
 require_once __DIR__ . '/src/PaymentOrderService.php';
+require_once __DIR__ . '/src/DniLookupService.php';
 
 $dataDirectory = getenv('PAYMENT_ORDER_DIR') ?: sys_get_temp_dir() . '/unah-payment-orders';
 $service = new PaymentOrderService(new PaymentOrderRepository($dataDirectory), new PaymentOrderPdf(), new PaymentOrderMailer(), getenv('APP_KEY') ?: 'local-development-key-change-in-production', $dataDirectory . '/mail.log');
 $baseUrl = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' ? 'https' : 'http') . '://' . ($_SERVER['HTTP_HOST'] ?? 'localhost') . strtok($_SERVER['REQUEST_URI'] ?? '/', '?');
+
+if (isset($_GET['consultar_dni'])) {
+  header('Content-Type: application/json; charset=utf-8');
+  try {
+    $person = (new DniLookupService(new CurlDniHttpClient()))->lookup(trim((string) $_GET['consultar_dni']));
+    echo json_encode(['ok' => true, 'persona' => $person], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+  } catch (InvalidArgumentException $error) {
+    http_response_code(404); echo json_encode(['ok' => false, 'message' => $error->getMessage()], JSON_UNESCAPED_UNICODE);
+  } catch (Throwable $error) {
+    error_log('dni lookup failed: ' . $error::class . PHP_EOL, 3, $dataDirectory . '/mail.log');
+    http_response_code(502); echo json_encode(['ok' => false, 'message' => 'No fue posible consultar el DNI. Intente nuevamente.'], JSON_UNESCAPED_UNICODE);
+  }
+  exit;
+}
 
 if (isset($_GET['download'], $_GET['expires'], $_GET['signature'])) {
   $document = $service->download((string)$_GET['download'], (int)$_GET['expires'], (string)$_GET['signature']);
@@ -86,9 +101,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       <section class="card">
         <div class="head">1. Datos del postulante</div>
         <div class="grid gap-2 p-2.5 sm:grid-cols-2 md:grid-cols-3 sm:p-3">
-          <div>
+          <div class="sm:col-span-2 md:col-span-1">
             <label class="label">DNI *</label>
-            <input id="dni" class="input" maxlength="8" inputmode="numeric" autocomplete="off" placeholder="12345678">
+            <div class="flex gap-1.5">
+              <input id="dni" class="input min-w-0" maxlength="8" inputmode="numeric" autocomplete="off" placeholder="12345678">
+              <button id="btnBuscarDni" type="button" class="btn2 shrink-0">Buscar</button>
+            </div>
+            <p id="estadoDni" class="mt-1 hidden text-[10px] font-semibold" aria-live="polite"></p>
           </div>
           <div>
             <label class="label">Apellido paterno *</label>
@@ -666,6 +685,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     calcular();
   }
 
+  async function buscarDni() {
+    const dni = $("dni").value.trim();
+    const estado = $("estadoDni");
+    if (!/^\d{8}$/.test(dni)) {
+      estado.className = "mt-1 text-[10px] font-semibold text-red-700";
+      estado.textContent = "Ingrese un DNI válido de 8 dígitos.";
+      return;
+    }
+
+    $("btnBuscarDni").disabled = true;
+    estado.className = "mt-1 text-[10px] font-semibold text-slate-600";
+    estado.textContent = "Consultando DNI…";
+    try {
+      const response = await fetch(`${window.location.pathname}?consultar_dni=${encodeURIComponent(dni)}`, {headers:{"Accept":"application/json"}});
+      const result = await response.json().catch(() => ({message:"Respuesta no válida del servicio."}));
+      if (!response.ok || !result.ok) throw new Error(result.message || "No se encontraron datos para el DNI.");
+      $("nombres").value = result.persona.nombres || "";
+      $("apPaterno").value = result.persona.apellido_paterno || "";
+      $("apMaterno").value = result.persona.apellido_materno || "";
+      estado.className = "mt-1 text-[10px] font-semibold text-emerald-700";
+      estado.textContent = "Datos cargados correctamente.";
+      actualizarResumen();
+    } catch (error) {
+      estado.className = "mt-1 text-[10px] font-semibold text-red-700";
+      estado.textContent = error.message || "No fue posible consultar el DNI.";
+    } finally {
+      $("btnBuscarDni").disabled = false;
+    }
+  }
+
   function renderTabla() {
     const tbody = $("tablaTasas");
     if (!tbody) return;
@@ -793,6 +842,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   });
 
   $("btnImprimir").addEventListener("click", () => window.print());
+  $("btnBuscarDni").addEventListener("click", buscarDni);
+  $("dni").addEventListener("keydown", event => {
+    if (event.key === "Enter") { event.preventDefault(); buscarDni(); }
+  });
 
   document.querySelectorAll("input, select").forEach(el => {
     el.addEventListener("input", actualizarResumen);
