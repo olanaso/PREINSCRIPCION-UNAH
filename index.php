@@ -1,5 +1,33 @@
 <?php
-$enviado = $_SERVER['REQUEST_METHOD'] === 'POST';
+declare(strict_types=1);
+require_once __DIR__ . '/src/PaymentOrderService.php';
+
+$dataDirectory = getenv('PAYMENT_ORDER_DIR') ?: sys_get_temp_dir() . '/unah-payment-orders';
+$service = new PaymentOrderService(new PaymentOrderRepository($dataDirectory), new PaymentOrderPdf(), new PaymentOrderMailer(), getenv('APP_KEY') ?: 'local-development-key-change-in-production', $dataDirectory . '/mail.log');
+$baseUrl = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' ? 'https' : 'http') . '://' . ($_SERVER['HTTP_HOST'] ?? 'localhost') . strtok($_SERVER['REQUEST_URI'] ?? '/', '?');
+
+if (isset($_GET['download'], $_GET['expires'], $_GET['signature'])) {
+  $document = $service->download((string)$_GET['download'], (int)$_GET['expires'], (string)$_GET['signature']);
+  if (!$document) { http_response_code(404); exit('El enlace no es válido o ha expirado.'); }
+  header('Content-Type: application/pdf'); header('Content-Disposition: attachment; filename="' . $document['name'] . '"');
+  header('X-Content-Type-Options: nosniff'); echo $document['content']; exit;
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+  header('Content-Type: application/json; charset=utf-8');
+  try {
+    $input = json_decode(file_get_contents('php://input'), true, 512, JSON_THROW_ON_ERROR);
+    $result = isset($input['retry_order_id']) ? $service->retry((string)$input['retry_order_id'], $baseUrl) : $service->createAndSend($input, $baseUrl);
+    echo json_encode($result, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+  } catch (InvalidArgumentException|JsonException $error) {
+    http_response_code(422); echo json_encode(['ok'=>false, 'message'=>$error instanceof JsonException ? 'La solicitud no es válida.' : $error->getMessage()]);
+  } catch (Throwable $error) {
+    error_log('payment-order request failed: ' . $error::class . PHP_EOL, 3, $dataDirectory . '/mail.log');
+    @chmod($dataDirectory . '/mail.log', 0600);
+    http_response_code(500); echo json_encode(['ok'=>false, 'message'=>'No pudimos completar la solicitud. Intente nuevamente.']);
+  }
+  exit;
+}
 ?>
 <!doctype html>
 <html lang="es">
@@ -466,9 +494,13 @@ $enviado = $_SERVER['REQUEST_METHOD'] === 'POST';
       </section>
 
       <section id="estadoEnvio" class="card hidden">
-        <div class="border-l-4 border-emerald-600 p-3">
-          <p class="text-xs font-bold text-emerald-700">Esquela generada</p>
+        <div id="estadoEnvioDetalle" class="border-l-4 border-emerald-600 p-3">
+          <p id="tituloEnvio" class="text-xs font-bold text-emerald-700">Esquela generada</p>
           <p id="msgCorreo" class="mt-1 text-[11px] leading-4 text-slate-600"></p>
+          <div class="mt-2 flex flex-wrap gap-2">
+            <a id="enlaceEsquela" class="btn2" href="#">Descargar PDF</a>
+            <button id="btnReintentar" type="button" class="btn2 hidden">Reintentar correo</button>
+          </div>
         </div>
       </section>
 
@@ -636,6 +668,7 @@ $enviado = $_SERVER['REQUEST_METHOD'] === 'POST';
 
   function renderTabla() {
     const tbody = $("tablaTasas");
+    if (!tbody) return;
     tbody.innerHTML = "";
 
     Object.values(TASAS).forEach(t => {
@@ -692,6 +725,28 @@ $enviado = $_SERVER['REQUEST_METHOD'] === 'POST';
     $("eMonto").textContent = money(calc.valor);
   }
 
+  let ultimaOrdenId = null;
+
+  function mostrarResultado(result) {
+    ultimaOrdenId = result.order_id;
+    const enviado = result.mail_sent;
+    $("estadoEnvio").classList.remove("hidden");
+    $("estadoEnvioDetalle").className = `border-l-4 p-3 ${enviado ? "border-emerald-600" : "border-amber-500"}`;
+    $("tituloEnvio").className = `text-xs font-bold ${enviado ? "text-emerald-700" : "text-amber-800"}`;
+    $("tituloEnvio").textContent = enviado ? "Orden generada y correo enviado" : "Orden generada; correo pendiente";
+    $("msgCorreo").textContent = result.message;
+    $("enlaceEsquela").href = result.download_url;
+    $("btnReintentar").classList.toggle("hidden", enviado);
+    $("btnImprimir").disabled = false;
+  }
+
+  async function enviarSolicitud(payload) {
+    const response = await fetch(window.location.pathname, {method:"POST", headers:{"Content-Type":"application/json", "Accept":"application/json"}, body:JSON.stringify(payload)});
+    const result = await response.json().catch(() => ({message:"No pudimos completar la solicitud. Intente nuevamente."}));
+    if (!response.ok) throw new Error(result.message || "No pudimos completar la solicitud. Intente nuevamente.");
+    return result;
+  }
+
   $("btnGenerar").addEventListener("click", async () => {
     const error = validarFormulario();
     if (error) {
@@ -700,17 +755,15 @@ $enviado = $_SERVER['REQUEST_METHOD'] === 'POST';
     }
 
     const calc = calcular();
-    const codigo = generarCodigo();
-    prepararEsquela(codigo, calc);
-
     const payload = {
-      codigo,
       dni: $("dni").value.trim(),
       nombres: nombreCompleto(),
       correo: $("correo").value.trim(),
       celular: $("celular").value.trim(),
       escuela: $("escuela").value.trim(),
       concepto: conceptoTexto(),
+      concepto_key: $("conceptoPago").value,
+      modalidad_key: $("modalidad").value,
       modalidad: $("conceptoPago").value === "inscripcion" ? TASAS[$("modalidad").value].nombre : null,
       procedencia: $("conceptoPago").value === "inscripcion" ? $("procedencia").value : null,
       periodo: $("conceptoPago").value === "inscripcion" ? $("periodo").value : null,
@@ -719,29 +772,24 @@ $enviado = $_SERVER['REQUEST_METHOD'] === 'POST';
       fecha_vencimiento: $("fechaVencimiento").value
     };
 
-    /*
-      PRODUCCIÓN:
-      Conecte este formulario a su backend. Ejemplo:
+    $("btnGenerar").disabled = true;
+    try {
+      const result = await enviarSolicitud(payload);
+      prepararEsquela(result.code, calc);
+      mostrarResultado(result);
+    } catch (error) {
+      alert(error.message || "No pudimos completar la solicitud. Intente nuevamente.");
+    } finally {
+      $("btnGenerar").disabled = false;
+    }
+  });
 
-      const response = await fetch('/api/esquelas/generar-enviar', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify(payload)
-      });
-      if (!response.ok) throw new Error('No se pudo enviar el correo');
-
-      El backend debe:
-      1) guardar la esquela,
-      2) generar el PDF,
-      3) adjuntar el PDF al correo,
-      4) enviar instrucciones de pago,
-      5) devolver el ID/código de la operación.
-    */
-
-    $("estadoEnvio").classList.remove("hidden");
-    $("msgCorreo").textContent =
-      `Esquela ${codigo} generada por ${money(calc.valor)}. El envío real debe ejecutarse desde el backend al correo ${payload.correo}.`;
-    $("btnImprimir").disabled = false;
+  $("btnReintentar").addEventListener("click", async () => {
+    if (!ultimaOrdenId) return;
+    $("btnReintentar").disabled = true;
+    try { mostrarResultado(await enviarSolicitud({retry_order_id: ultimaOrdenId})); }
+    catch (error) { alert(error.message || "No fue posible reenviar el correo. Intente nuevamente."); }
+    finally { $("btnReintentar").disabled = false; }
   });
 
   $("btnImprimir").addEventListener("click", () => window.print());
@@ -825,4 +873,3 @@ $enviado = $_SERVER['REQUEST_METHOD'] === 'POST';
 </script>
 </body>
 </html>
-
