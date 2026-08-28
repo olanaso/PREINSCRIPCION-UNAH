@@ -5,15 +5,15 @@ declare(strict_types=1);
 require_once __DIR__ . '/../src/DniLookupService.php';
 
 $client = new class implements DniHttpClient {
-    public string $url = '';
-    public array $headers = [];
+    public $url = '';
+    public $headers = array();
     public function get(string $url, array $headers): array
     {
         $this->url = $url;
         $this->headers = $headers;
-        return ['status' => 200, 'body' => json_encode(['data' => ['persona' => [
+        return array('status' => 200, 'body' => json_encode(array('data' => array('persona' => array(
             'nombres' => 'MARÍA ELENA', 'apellidoPaterno' => 'QUISPE', 'apellidoMaterno' => 'FLORES'
-        ]]])];
+        )))));
     }
 };
 
@@ -21,7 +21,7 @@ $person = (new DniLookupService($client))->lookup('70021899');
 assert($person['nombres'] === 'MARÍA ELENA');
 assert($person['apellido_paterno'] === 'QUISPE');
 assert($person['apellido_materno'] === 'FLORES');
-assert(str_contains($client->url, 'tipoDocumento=DNI&nroDocumento=70021899'));
+assert(strpos($client->url, 'tipoDocumento=DNI&nroDocumento=70021899') !== false);
 assert(in_array('Authorization: Bearer', $client->headers, true));
 
 try {

@@ -33,7 +33,7 @@ try {
 
     $configuration = require __DIR__ . '/config.php';
     $service = unahPaymentOrderService($configuration['mail']);
-    $result = $service->createAndSend($input, unahDownloadEndpointUrl());
+    $result = $service->sendSimulatedReceipt($input);
     echo json_encode($result, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 } catch (InvalidArgumentException $error) {
     http_response_code(422);
@@ -41,5 +41,5 @@ try {
 } catch (Throwable $error) {
     error_log(get_class($error) . ': ' . $error->getMessage());
     http_response_code(500);
-    echo json_encode(array('error' => 'No se pudo generar la esquela. Intente nuevamente.'), JSON_UNESCAPED_UNICODE);
+    echo json_encode(array('error' => 'No se pudo enviar el recibo. Intente nuevamente.'), JSON_UNESCAPED_UNICODE);
 }
